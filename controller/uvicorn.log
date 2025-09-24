@@ -1,0 +1,7 @@
+INFO:     Started server process [958295]
+INFO:     Waiting for application startup.
+2025-09-24 21:41:29,687 | INFO | controller.app.session_manager | Starting session manager
+2025-09-24 21:41:29,687 | WARNING | controller.app.sensors.realsense | RealSense hardware disabled – using placeholder frames
+2025-09-24 21:41:29,687 | INFO | controller.app.sensors.tof | Starting ToF polling threshold=450 debounce_ms=200 interval_ms=50
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:5000 (Press CTRL+C to quit)

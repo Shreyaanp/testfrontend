@@ -4,14 +4,21 @@ import type { SessionEvent, SessionPhase } from '../app-state/sessionMachine'
 
 const DEFAULT_WS_URL = 'ws://127.0.0.1:5000/ws/ui'
 
-interface ControllerMessage {
+export interface ControllerMessage {
   type: string
   phase?: string
   data?: Record<string, unknown>
   error?: string
 }
 
-export function useControllerSocket(send: Sender<SessionEvent>) {
+export type SocketStatus = 'connecting' | 'open' | 'closed'
+
+interface ControllerSocketOptions {
+  onEvent?: (message: ControllerMessage) => void
+  onStatusChange?: (status: SocketStatus) => void
+}
+
+export function useControllerSocket(send: Sender<SessionEvent>, options?: ControllerSocketOptions) {
   const retryRef = useRef<number | null>(null)
   const socketRef = useRef<WebSocket | null>(null)
 
@@ -21,6 +28,7 @@ export function useControllerSocket(send: Sender<SessionEvent>) {
 
     const connect = () => {
       if (cancelled) return
+      options?.onStatusChange?.('connecting')
       const socket = new WebSocket(wsUrl)
       socketRef.current = socket
 
@@ -29,11 +37,13 @@ export function useControllerSocket(send: Sender<SessionEvent>) {
           window.clearTimeout(retryRef.current)
           retryRef.current = null
         }
+        options?.onStatusChange?.('open')
       }
 
       socket.onmessage = (event) => {
         try {
           const message: ControllerMessage = JSON.parse(event.data)
+          options?.onEvent?.(message)
           if (message.type === 'heartbeat') {
             send({ type: 'HEARTBEAT' })
             return
@@ -54,6 +64,7 @@ export function useControllerSocket(send: Sender<SessionEvent>) {
       socket.onclose = () => {
         if (cancelled) return
         retryRef.current = window.setTimeout(connect, 2000)
+        options?.onStatusChange?.('closed')
       }
 
       socket.onerror = () => {
@@ -70,6 +81,7 @@ export function useControllerSocket(send: Sender<SessionEvent>) {
       }
       socketRef.current?.close()
       socketRef.current = null
+      options?.onStatusChange?.('closed')
     }
-  }, [send])
+  }, [send, options])
 }

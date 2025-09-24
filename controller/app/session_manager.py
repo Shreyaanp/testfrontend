@@ -55,7 +55,7 @@ class SessionManager:
         )
         self._tof.register_callback(self._handle_tof_trigger)
 
-        self._realsense = RealSenseService()
+        self._realsense = RealSenseService(enable_hardware=self.settings.realsense_enable_hardware)
         self._http_client = PairingHttpClient(self.settings)
         self._ws_client = BackendWebSocketClient(self.settings)
 

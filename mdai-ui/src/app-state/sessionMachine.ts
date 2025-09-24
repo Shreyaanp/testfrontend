@@ -64,22 +64,22 @@ export const sessionMachine = createMachine<SessionContext, SessionEvent>(
     context: {},
     on: {
       CONTROLLER_STATE: [
-        { cond: phaseGuard('idle'), target: 'idle', actions: resetContext },
-        { cond: phaseGuard('pairing_request'), target: 'pairing_request' },
-        { cond: phaseGuard('qr_display'), target: 'qr_display', actions: assignPairingDetails },
-        { cond: phaseGuard('waiting_activation'), target: 'waiting_activation' },
-        { cond: phaseGuard('human_detect'), target: 'human_detect' },
-        { cond: phaseGuard('stabilizing'), target: 'stabilizing' },
-        { cond: phaseGuard('uploading'), target: 'uploading' },
-        { cond: phaseGuard('waiting_ack'), target: 'waiting_ack' },
-        { cond: phaseGuard('complete'), target: 'complete' },
-        { cond: phaseGuard('error'), target: 'error', actions: assignError }
+        { cond: phaseGuard('idle'), target: '.idle', actions: resetContext },
+        { cond: phaseGuard('pairing_request'), target: '.pairing_request' },
+        { cond: phaseGuard('qr_display'), target: '.qr_display', actions: assignPairingDetails },
+        { cond: phaseGuard('waiting_activation'), target: '.waiting_activation' },
+        { cond: phaseGuard('human_detect'), target: '.human_detect' },
+        { cond: phaseGuard('stabilizing'), target: '.stabilizing' },
+        { cond: phaseGuard('uploading'), target: '.uploading' },
+        { cond: phaseGuard('waiting_ack'), target: '.waiting_ack' },
+        { cond: phaseGuard('complete'), target: '.complete' },
+        { cond: phaseGuard('error'), target: '.error', actions: assignError }
       ],
       HEARTBEAT: {
         actions: assign({ lastHeartbeatTs: () => Date.now() })
       },
       RESET: {
-        target: 'idle',
+        target: '.idle',
         actions: assign({ pairingToken: undefined, expiresIn: undefined, error: undefined })
       }
     },
@@ -97,4 +97,3 @@ export const sessionMachine = createMachine<SessionContext, SessionEvent>(
     }
   }
 )
-

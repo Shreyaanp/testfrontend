@@ -1,0 +1,272 @@
+MDai Messaging Playbook
+=======================
+
+Overview
+--------
+- **Device (Jetson controller)**: `controller/app` connects to backend via REST + `/ws/device/{device_id}`. Sends RealSense payloads.
+- **Backend**: `backend/mDaiBackend` brokers pairing, sessions, and message relaying.
+- **Mobile app (Flutter)**: `mercleapp/lib` connects to `/ws/app`, scans QR, and claims sessions.
+- **React UI**: `mdai-ui` mirrors controller phases at `ws://127.0.0.1:5000/ws/ui` (omitted below). Messaging focus is backend ⇆ device ⇆ mobile.
+
+Notation
+--------
+`D` = Device (controller) `B` = Backend `A` = App (Flutter)
+Messages show direction `D → B` etc. HTTP routes have verb + path; WebSocket frames show `type`.
+
+A. Pairing Handshake (HTTP + WS setup)
+-------------------------------------
+1. `D → B` – POST `/pair/prepare`
+   ```json
+   { "device_id": "alpha" }
+   ```
+2. `B → D` – Response
+   ```json
+   { "nonce": "<nonce>" }
+   ```
+3. `D` signs `challenge = "alpha||<nonce>"` with kiosk private key (EVM personal sign).
+4. `D → B` – POST `/pair/request`
+   ```json
+   {
+     "device_id": "alpha",
+     "signature": "0x..."  // 65-byte secp256k1 signature
+   }
+   ```
+5. `B → D` – Response
+   ```json
+   {
+     "pairing_token": "<token>",
+     "expires_in": 120
+   }
+   ```
+6. `D` broadcasts token via local UI (`qr_display`) for QR generation.
+7. `A → B` – WebSocket connect to `/ws/app` *(token embedded in query string via QR, see `SimpleWebSocketService`)*.
+8. `B → A` – Immediately pushes
+   ```json
+   {
+     "type": "connection_established",
+     "app_connection_id": "<uuid>"
+   }
+   ```
+9. `D → B` – WebSocket connect to `/ws/device/alpha` (see `BackendWebSocketClient`).
+
+B. Session Claim
+----------------
+10. `A → B` – POST `/pair/claim`
+    ```json
+    {
+      "pairing_token": "<token>",
+      "app_connection_id": "<uuid>"
+    }
+    ```
+11. Backend tasks:
+    - Validates token + connection.
+    - Creates session `{ session_id, session_key }`.
+    - Marks device BUSY (`storage.create_session`).
+12. `B → D` and `B → A` (two pushes) – session activation
+    ```json
+    {
+      "type": "session_activated",
+      "session_id": "<sid>",
+      "session_key": "<skey>"
+    }
+    ```
+13. Device stores session, sets `_session_active_event.set()`. App stores session for subsequent messages.
+
+C. Heartbeats
+-------------
+- `D → B`: `{ "type": "heartbeat" }` every ~30s (`BackendWebSocketClient` auto ping).
+- `A → B`: optional `{ "type": "heartbeat" }` (see `SimpleWebSocketService`, `sendHeartbeat`).
+- Backend updates last_seen and forwards `{ "type": "heartbeat" }` to the opposite side via storage timers (see `handle_heartbeat`).
+
+D. RealSense Capture & Upload
+-----------------------------
+14. Device collects frames (`RealSenseService`). When best frame ready:
+15. Device builds envelope (`SessionManager._upload_frame`):
+    ```json
+    {
+      "type": "session_message",
+      "envelope": {
+        "session_id": "<sid>",
+        "seq": 1,
+        "timestamp": 1700000000000,
+        "payload": {
+          "snapshot_base64": "<JPEG base64>"
+        },
+        "hmac": "<hex sha256>"
+      }
+    }
+    ```
+    - `hmac = sha256(session_key, session_id + seq + timestamp + canonical(payload))`
+    - `seq` increments per outbound message from device (`_current_session.next_seq`).
+16. `D → B` – send envelope via WebSocket.
+17. Backend validation (`handle_session_message`):
+    - Loads session, ensures active.
+    - Verifies HMAC & sequence (must be `device_seq + 1`).
+18. On success: `B → A` forwards identical message
+    ```json
+    {
+      "type": "session_message",
+      "envelope": { ... }  // unchanged payload
+    }
+    ```
+19. Device waits on `_ack_event` for application acknowledgement.
+
+E. App Responses
+----------------
+20. App processes snapshot and can reply with its own secure payload (see `kiosk_websocket_service.dart`):
+    ```json
+    {
+      "type": "session_message",
+      "envelope": {
+        "session_id": "<sid>",
+        "seq": 1,
+        "timestamp": 1700000005000,
+        "payload": {
+          "result": "success",
+          "metadata": { "score": 0.93 }
+        },
+        "hmac": "<hex sha256>"
+      }
+    }
+    ```
+    - App maintains its own sequence counter (`app_seq`).
+21. `A → B`: send message (WebSocket).
+22. Backend verifies and forwards to device.
+23. Device receives via `_handle_backend_message` with `type=session_message` and can act accordingly (e.g., log, trigger UI update).
+
+F. Hardware Registration (optional path)
+----------------------------------------
+24. Device may initiate registration (see `handle_device_message`):
+    ```json
+    {
+      "type": "hardware_register",
+      "platform_id": "jetson-nano-01",
+      "image_base64": "<JPEG base64>"
+    }
+    ```
+25. Backend submits to admin API, then replies:
+    ```json
+    {
+      "type": "hardware_register_result",
+      "ok": true,
+      "status": 200,
+      "data": { "id": "HW-123" }
+    }
+    ```
+    - Forwarded to both device and app if session present.
+
+G. Session Termination
+----------------------
+26. App or device can request end:
+    - App: `{ "type": "end_session", "reason": "user_cancelled" }`
+    - Device: same schema.
+27. Backend `handle_end_session` sends final message to both:
+    ```json
+    {
+      "type": "end_session",
+      "reason": "manual"
+    }
+    ```
+28. Backend marks session ended, device status → ONLINE, session removed from storage.
+29. Device `_ack_event` set → controller transitions to `COMPLETE` then `IDLE`.
+
+Sequence Summary
+----------------
+```
+D: POST /pair/prepare ------------------> B
+B: {nonce} ----------------------------- D
+D: POST /pair/request ------------------> B
+B: {pairing_token} --------------------- D
+A: WS connect /ws/app -----------------> B
+B: {connection_established} -----------> A
+D: WS connect /ws/device/alpha --------> B
+A: POST /pair/claim --------------------> B
+B: {session_activated} ---------------> D, A
+D: {session_message snapshot} ---------> B
+B: {session_message snapshot} ---------> A
+A: {session_message result} ----------> B
+B: {session_message result} ----------> D
+B: {end_session} <--------------------- D, A
+```
+
+Error Notes
+-----------
+- Signature mismatch on `/pair/request` → 401, controller enters `ERROR` (`sessionManager._set_phase`).
+- Token expired on `/pair/claim` → 410; QR should refresh.
+- HMAC or sequence failure → backend logs warning, message dropped. Device/app must retry with next sequence.
+- WebSocket disconnects trigger `storage.remove_*_connection`, ending the session with reason `device_disconnected` / `app_disconnected`.
+
+
+Sequence Diagram
+----------------
+Device (Jetson)        Backend (FastAPI)             Mobile App (Flutter)
+--------------------   ---------------------------   ----------------------
+1. POST /pair/prepare ─────────────────────────────→
+2. ←────────────────────────────── { nonce }
+3. sign "device||nonce"
+4. POST /pair/request ─────────────────────────────→
+5. ←────────────────────── { pairing_token, expires }
+6. WS connect /ws/device/{id} ───────────────→
+7. QR displayed locally (token)
+8.                                   WS connect /ws/app?token=… ←──────────
+9.                             → { connection_established, app_connection_id }
+10. POST /pair/claim ─────────────────────────────→
+11. ←──────── { session_activated, session_id, session_key } ───────────────
+12. { session_message snapshot } ─────────────→
+13.                       → { session_message snapshot } ────────────────→
+14.                                   ←────────────── { session_message result }
+15. ←────────────── { session_message result }
+16. { end_session, reason } ←───────────
+17.                       ←────────────── { end_session, reason }
+
+Dry-Run Log (Simulated)
+-----------------------
+```text
+[controller][INFO] Phase → pairing_request (triggered by ToF)
+[controller][HTTP] POST /pair/prepare device_id=alpha
+[backend][INFO] pair_prepare: nonce issued for device alpha
+[controller][HTTP] Response nonce=dk2Tw...Y2
+[controller][CRYPTO] Signed challenge alpha||dk2Tw...Y2 (0x3f57...a9)
+[controller][HTTP] POST /pair/request token request
+[backend][INFO] pair_request: token issued device_id=alpha token=QWE12...
+[controller][HTTP] Response pairing_token=QWE12... expires=120
+[controller][STATE] Broadcast qr_display (token=QWE12...)
+[app][QR] Decoded token=QWE12..., ws_app_url=https://mdai.mercle.ai
+[app][WS] Connecting wss://mdai.mercle.ai/ws/app?token=QWE12...
+[backend][WS] App connected: app_connection_id=Ap7B...1x
+[device][WS] Connecting wss://mdai.mercle.ai/ws/device/alpha
+[backend][WS] Device alpha connected
+[app][HTTP] POST /pair/claim token=QWE12... app_connection_id=Ap7B...1x
+[backend][INFO] Session created session_id=Sxn3... session_key=KeY...
+[backend][WS→device] {"type":"session_activated","session_id":"Sxn3...","session_key":"KeY..."}
+[backend][WS→app] same payload forwarded
+[controller][STATE] Phase → human_detect
+[controller][REAL SENSE] Selected frame focus=612 composite=0.83
+[controller][WS→backend] session_message seq=1 payload.snapshot_base64=... hmac=ab39...
+[backend][SECURITY] HMAC verified session Sxn3... seq=1
+[backend][WS→app] Forwarded session_message seq=1
+[app][PROCESS] Snapshot stored result=success score=0.92
+[app][WS→backend] session_message seq=1 payload.result="success" hmac=cd45...
+[backend][SECURITY] HMAC verified session Sxn3... seq=1 (app side)
+[backend][WS→device] Forwarded session_message result success
+[controller][SESSION] Ack received; Phase → waiting_ack → complete
+[backend][WS→device] {"type":"end_session","reason":"app_complete"}
+[backend][WS→app] same payload forwarded
+[controller][STATE] Phase → idle (session reset)
+[backend][STATUS] Device alpha set ONLINE
+```
+
+
+
+
+> - Controller bootstraps cleanly on Jetson as-is—the backend clients, session flow, and RealSense upload logic are already wired for deployment (see controller/app/
+  session_manager.py:31 through controller/app/session_manager.py:214).
+  - ToF is the one blocker: SessionManager currently injects mock_distance_provider, which never produces a distance (controller/app/session_manager.py:23 and controller/app/sensors/
+  tof.py:77). Until you implement a real provider that returns millimeter readings, the workflow will only start via /debug/trigger.
+  - After porting, add a module that reads your ToF hardware and pass it into SessionManager(...) (or swap mock_distance_provider in config) so _handle_tof_trigger fires when a user
+  steps in (controller/app/session_manager.py:105).
+  - RealSense will work once you flip REALSENSE_ENABLE_HARDWARE=true and install pyrealsense2, opencv-python, and the mediapipe build in the container; otherwise it continues to serve
+  placeholder frames (controller/app/sensors/realsense.py:23).
+  - Confirm the Docker image exposes /dev/video* and the USB bus to the container so both ToF and RealSense drivers see the devices.
+
+  Once you plug in the actual ToF distance provider and set up the camera stack, you’re ready to run the full session loop on the Jetson.

@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     mediapipe_confidence: float = Field(0.6, description="Minimum face detector confidence")
     stability_seconds: float = Field(4.0, description="Duration the user must stay stable")
 
+    realsense_enable_hardware: bool = Field(
+        False, description="Enable RealSense hardware pipeline (set True on Jetson with camera attached)"
+    )
+
     log_level: str = Field("INFO", description="Logging level for controller")
 
     class Config:
@@ -51,4 +55,3 @@ def get_settings(override_env_file: Optional[Path] = None) -> Settings:
     if override_env_file:
         return Settings(_env_file=str(override_env_file))
     return Settings()
-
